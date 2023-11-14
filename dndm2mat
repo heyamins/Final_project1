@@ -1,0 +1,1056 @@
+% Load DNDM or GDD data traces
+%
+%   OUT = DNDM2MAT(FILESPEC, OPTIONS, ..)
+%       Load data traces from FILESPEC. FILESPEC can be a string or a cell
+%       array of strings that can specify files or directories and may
+%       contain wildcards.  When no FILESPEC is specified, a dialog is
+%       displayed to select one or more files.
+%
+%       Files with following extensions will be handled:
+%           .mat
+%           .DNDM_data.res
+%           .res
+%           .gdd
+%           .DNDM_data.res.gz
+%           .res.gz
+%           .gdd.gz
+%
+%       Specifying the extension is optional. When a directory is specified
+%       all files with above extensions will be used as input.
+%
+%       Files with the same basename but different extensions generally
+%       contain equivalent data. Therefore the above extensions will be
+%       stripped from the specified filenames. The equivalent filenames
+%       will be used which name will be resolved according following rules:
+%           1. strip all of the above extensions from FILESPEC, resulting
+%              the basename.
+%           2. add each of the above extensions to basename and return the
+%              most recent modified file.
+%           3. when multiple most recent files exist with the same timestamp,
+%              then return the file that matches the first in the list
+%              of above extensions.
+%       This resolve process will be skipped when option 'exact' is set.
+%       In that case the file will be used exactely as specified.
+%
+%       OPTIONS are name-value pairs:
+%           'format'       - 0-3: output format of traces (default 1) See below.
+%           'mat'          - 1: Save converted data for each file to a
+%                               mat-file in format 2 if this file does not
+%                               exist yet.  mat-file is stored in the same
+%                               directory where data file is located.
+%                               The supported extensions from the original
+%                               filename will be stripped and replaced by
+%                               the .mat extension.
+%                               The timestamp of the mat-file will be
+%                               identical to the timestamp of the original
+%                               file.
+%                            0: Do not create mat-file (default)
+%           'cache'        - 1: Cache converted data for each file on the
+%                               local disk in format 2 if not cached yet.
+%                               Next time the data file is read, the data
+%                               will be taken from the local cache.
+%                            0: do not create cached data (default).
+%           'cell'         - 1: output a cell array for multiple input files
+%                            0: output a structure array (default)
+%           'convert_only' - 1: do not generate output structure or cell
+%                               array. Usefull for batch conversion of
+%                               directories without allocating large
+%                               amounts of memory to collect output of each
+%                               file.
+%                            0: generate output structure or cell array (default)
+%           'exact'          1: read files with name exactely as specified.
+%                               Do not use cached data either.
+%                            0: ignore defined extensions and load most
+%                               recent equivalent file is described above (default)
+%           'maxproc'      - n: maximum number of parallel background
+%                               processes to convert DD files
+%                               (default: number of available processors
+%                                minus one with a maximum of 8).
+%                            0: Do not parallel convert DD files in
+%                               background.
+%           'keep_orgin'   - 1: keep orginal data file when mat-file is
+%                               created (default)
+%                            0: delete original data file when mat-file
+%                               is created successfully.
+%           'timeroundoff' - T: change time vector with maximum T seconds
+%                               if this would create a time vector that
+%                               matches the time vector of any of the other
+%                               signals. (default 0: do not roundoff).
+%           'fast'         - 1: create time vector values based on first and
+%                               last time string value only (default).
+%                            0: create time vector values by converting
+%                               each individual time string. (only effective
+%                               for old DNDM formats before 11-06-2010).
+%           'verbose'      - 0: be quiet
+%                            1: show filenames (default)
+%                            2: include timing summary
+%                            3: include timing details
+%
+%       OUT contains DNDM or GDD data traces in one of the specified
+%       formats (default format 1).
+%
+% definitions:
+%   SIGNAL  - vector of sampled values of some quantity that is sampled
+%             with a constant sample rate. Info on the actual time the
+%             samples were taken is available in TIME and DATE.
+%   TIME    - vector with equidistant time values at which a signal was
+%             sampled. The time values are in seconds, relative to DATE.
+%   DATE    - string representing the time that corresponds with 0 seconds
+%             in the time vector.
+%   TRACE   - set of parallel sampled signals. These signals all share the
+%             same time vector and date.
+%
+% ------------------------------------------------------------------------
+% FORMAT 0:    *** obsolete ***
+%       Has no field named 'traces'. The output just contains traces that
+%       share the same time vectors. Each trace contains the file name.
+%       This format is only effective for DNDM-res files.
+%       When specifying format 0 for GDD files a warning is generated
+%       and traces are converted to format 1.
+%
+%   out = DNDM2MAT(file, 'format', 0)
+%        =>   out(n).date   : 'Thu, 01 Jan 0070 02:34:10 150000us +0100'
+%                    time   : [16384x1 double]
+%                    struct : [11x39 char]
+%                    WPxBM.MeasSys.BM2BF.ODT_MS_OUT_X
+%                     ...
+%                    file   : 'Z:\GDD_data\bm_homing2.DNDM_data.res.gz
+%
+%   'n' is the index for different time vectors.
+%
+%   Data from multiple files is concatenated into the same OUT structure,
+%   unless the option 'cell' is true. In that case a cell array is returned
+%   with the traces from one file in each cell.
+%
+%   NOTE: multiple signals with the same time vector and the same name
+%   can not be stored in format 0.
+%
+% ------------------------------------------------------------------------
+% FORMAT 1:
+%       Each trace contains signals that share an identical time vector
+%       and date.
+%
+%   out = DNDM2MAT(file, 'format', 1)
+%             out(f).file             : 'Z:\GDD_data\bm_homing2.DNDM_data.res.gz
+%             out(f).content          : [20x45 char]
+%        =>   out(f).traces(n).date               : 'Thu, 01 Jan 0070 02:34:10 150000us +0100'
+%                              time               : [16384x1 double]
+%                              trigger_definition : [1x1 struct]   ?
+%                              struct             : [11x39 char]
+%                              WPxBM.MeasSys.BM2BF.ODT_MS_OUT_X
+%                                ...
+%
+%   'f' is the index for different files.
+%   'n' is the index for different time vectors.
+%
+%   NOTE: multiple signals with the same time vector and the same name
+%   can not be stored in format 1.
+%   When converting from format 2 to format 1, it is assumed that trigger
+%   definitions of all signals with the same time vector are identical. So,
+%   the first trigger_definition from a unique time vector will be used in
+%   format 1.
+%
+% ------------------------------------------------------------------------
+% FORMAT 2:
+%       Each signal has its own time vector and date.
+%       Format 2 has no traces (as defined above), only signals.
+%       Confusingly these signals are called traces in this format.
+%
+%   out = DNDM2MAT(file, 'format', 2)
+%        =>   out(f).file          : 'Z:\GDD_data\bm_homing2.DNDM_data.res.gz'
+%             out(f).traces.date   : 'Thu, 01 Jan 0070 02:34:10 150000us +0100'    ?
+%                           struct : [11x39 char]
+%                           WPxBM.MeasSys.BM2BF.ODT_MS_OUT_X(k).time
+%                                                              .values
+%                                                              .date  ?
+%                                                              .name
+%                                                              .trigger_definition
+%                            ...
+%
+%   'f' is the index for different files.
+%   'k' is the index for multiple signals with the same name
+%
+% ------------------------------------------------------------------------
+% FORMAT 3:
+%       Time vector and values of signals in a trace are collected in an
+%       'xy' array, where the first column contains the time vector.
+%
+%          date?
+%
+%   out = DNDM2MAT(file, 'format', 3
+%        => out(f).traces(n).xy                 : [16384x28 double]
+%                            struct             : [28x50 char]
+%                            trigger_definition : [1x1 struct]
+%                            name               : 'LoS1_XZ1_trace_9'
+%           out(f).file                         : 'Z:\GDD_data\PWCO_EMK_LoS1_XZ1_move1_Y_0_Expose.DNDM_data.gdd.gz')
+%
+%   'f' is the index for different files.
+%   'n' is the index for different time vectors.
+%
+% ------------------------------------------------------------------------
+%
+% Examples:
+%       out = DNDM2MAT
+%       out = DNDM2MAT(file, 'verbose', 3, 'mat', 1)
+%       out = DNDM2MAT(file, 'timeroundoff', 100e-6)
+%
+% See also DNDM2MAT_batch, DNDM2matlab, disk_cache
+
+function [out, t_timing] = DNDM2MAT(varargin)
+
+% initialize
+out=[];
+failcount=0;
+successcount=0;
+
+%% parse options
+option.verbose = 1;
+option.format = 1;
+option.fast = 1;
+option.gzip = 0;
+option.timeroundoff = 0;
+option.mat = 0;
+option.keep_orgin = 1;
+option.cache = 0;
+option.cell = 0;
+option.cat = 0;
+option.maxproc = 0;%min(numproc-1, 8);
+option.convert_only = 0;
+option.exact = 0;
+if nargin>0 & rem(numel(varargin), 2) %#ok<*AND2>
+    file = varargin{1};
+    varargin(1) = [];
+else
+    file = '';
+end
+for k = 1:2:numel(varargin)
+    switch varargin{k}
+        case  'verbose'
+            if ischar(varargin{k+1})
+                option.verbose = str2double(varargin{k+1});
+            else
+                option.verbose = varargin{k+1};
+            end
+        case  'fast'
+            option.fast = isyes(varargin{k+1});
+        case  'format'
+            if ischar(varargin{k+1})
+                option.format = str2double(varargin{k+1});
+            else
+                option.format = varargin{k+1};
+            end
+        case  'gzip'
+            option.gzip = isyes(varargin{k+1});
+            warning('option gzip is not effective anymore')
+        case  'timeroundoff'
+            if ischar(varargin{k+1})
+                option.timeroundoff = str2double(varargin{k+1});
+            else
+                option.timeroundoff = varargin{k+1};
+            end
+        case  'mat'
+            option.mat = isyes(varargin{k+1});
+        case  'keep_orgin'
+            option.keep_orgin = isyes(varargin{k+1});
+        case  'cache'
+            option.cache = isyes(varargin{k+1});
+        case  'cell'
+            option.cell = isyes(varargin{k+1});
+        case  'maxproc'
+            if ischar(varargin{k+1})
+                option.maxproc = str2double(varargin{k+1});
+            else
+                option.maxproc = varargin{k+1};
+            end
+        case  'convert_only'
+            option.convert_only = isyes(varargin{k+1});
+        case  'exact'
+            option.exact = isyes(varargin{k+1});
+        case  'cat'
+            option.cat =  isyes(varargin{k+1});
+        otherwise
+            if ischar(varargin{k})
+                error('unknown option: %s', varargin{k})
+            else
+                error('invalid option identifier at argument %d', k);
+            end
+    end
+end
+
+% Background processing with SystemBackground object is not available for Matlab<7
+if MatlabVerLessThan('8.0') %was '7.6'
+    option.maxproc = 0;
+end
+
+%% when no FILE is specified display GUI to select one or more files
+if isempty(file)
+    option.exact=1;
+    if ~MatlabVerLessThan('7.6')
+        [filename, path] = uigetfile( ...
+            {'*.DNDM_data.res;*.res;*.DNDM_data.res.gz;*.res.gz;*.gdd;*.gdd.gz;*.mat', 'ASML output (*.mat, *.res, *.gdd, *.res.gz, *.gdd.gz)'; ...
+            '*.DNDM_data.res;*.res;*.DNDM_data.res.gz;*.res.gz',                       'DNDM output (*.res, *.res.gz)'; ...
+            '*.gdd;*.gdd.gz',                                                          'CPPD output (*.gdd, *.gdd.gz)';...
+            '*.mat',                                                                   'Matlab (*.mat)'; ...
+            '*.*',                                                                     'All Files (*.*)'}, ...
+            'Pick the files', ...
+            'MultiSelect', 'on');
+    else
+        [filename, path] = uigetfiles('*.DNDM_data.res;*.res;*.DNDM_data.res.gz;*.res.gz;*.gdd;*.gdd.gz;*.mat', ...
+            'Pick the files');
+    end
+    if isnumeric(path)
+        % Cancel was pressed
+        return
+    end
+    
+    % concatenate path and filenames
+    file = strcat(path, filename);
+end
+
+%% resolve extensions and create cell array FILENAME with unique full filenames
+if ~option.exact
+    % resolve wildcards and return files with unique basenames, with
+    % the extension resolved to the newest file or with extension
+    % precedence in the specified extension order.
+    extensions = {'.mat', '.DNDM_data.res', '.res', '.gdd', '.DNDM_data.res.gz', '.res.gz', '.gdd.gz'};
+    filename = resolve_equivalent_filenames(file, extensions);
+else
+    % do not resolve to any specific extension
+    filename = resolve_equivalent_filenames(file, {''});
+end
+
+%% determine how files should be handled
+[iscache, ismat, isDD, usefile] = filetype(filename, option);
+DDidx = find(isDD); % index of filenames that should be converted from DD
+
+%% start converting DD files in background when more than 1 file has to be converted
+if option.maxproc>0 && sum(isDD)>1
+    try
+        H = start_convert_DDfiles(usefile(isDD), option.maxproc, option.verbose);
+        if option.verbose > 1
+            fprintf('\nParallel processing of DD files over %d cores:\n',option.maxproc)
+        end
+    catch
+        H = [];
+    end
+else
+    H = [];
+end
+
+%% handle each filename
+out = cell(numel(filename), 1);
+t_timing = zeros(numel(filename), 8);
+for k = 1:numel(filename)
+    
+    % handle mat-file
+    if ismat(k) && ~option.convert_only
+        % data does not need to be retrieved from mat when convert_only option is set
+        if option.verbose >= 1
+            fprintf('%s (mat)\n', filename{k});      % show original filename
+        end
+        [out{k}, t_timing(k, :)] = handle_matfile(usefile{k}, option);
+    end
+    
+    % handle cached-file
+    if iscache(k) && ~option.convert_only
+        % data does not need to be retrieved from cache when convert_only option is set
+        if option.verbose >= 1
+            fprintf('%s (cache)\n', filename{k});    % show original filename
+        end
+        [out{k}, t_timing(k, :)] = handle_cachedfile(usefile{k}, option);
+    end
+    
+    % handle DD-file
+    if isDD(k)
+        % handling DD files is done as last to allow background DD file
+        % conversion time, while mat and cache files are handled by Matlab
+        
+        if ~isempty(H)
+            % wait for next background task to finish
+            tasknr = H.waitForNextTask;
+            
+            % note that conversion is not handled in the same order as the
+            % files are specified. First finished file is done first. This
+            % prevents waiting for a file that takes relatively long to convert
+            % from DD.
+            
+            % translate tasknr to file index
+            kk = DDidx(tasknr);
+        else
+            tasknr = k;
+            kk = k;
+        end
+        
+        if option.verbose >= 1
+            disp(usefile{kk});
+        end
+        
+        [out{kk}, t_timing(kk, :)] = handle_converted_DDfile(usefile{kk}, H, tasknr, option);
+        if isempty(out{kk})
+            failcount = failcount+1;
+        else
+            successcount = successcount+1;
+        end    
+        if option.convert_only
+            out{kk} = [];
+        end
+    end
+end
+
+% %% write to logfile
+% for k = 1:numel(filename)
+%     try
+%         t0 = now;
+%         collect_logdata(filename{k}, out{k}, t_timing(k, 1:7), option);
+%         t_timing(k, 8) = (now-t0)*3600*24;
+%     catch
+%     end
+% end
+
+%% collect all traces in a structure array
+if ~option.cell
+    out = cat_struct(1, out{:});
+end
+
+%% summarize timing and conversion
+if option.verbose >= 2
+    fprintf('\n');
+    fprintf('%d files handled.\n', numel(filename));
+    if successcount>0
+        fprintf('%d files successfully converted to mat-file.\n', successcount);
+    end
+    if failcount>0
+        fprintf('%d files failed to converted to mat-file.\n', failcount);
+    end    
+    tsum = sum(t_timing, 1);
+    fprintf('loadCache   loadMat    readDD   convert chgFormat   saveMat saveCache  writeLog    =Total=\n');
+    fprintf('%9.3f ', tsum, sum(tsum));
+    fprintf('  [s]\n');
+end
+
+
+
+% ------------------------------------------------------------------------
+%% determine how files should be handled
+function [iscache, ismat, isDD, usefile] = filetype(filename, option)
+
+% initialize
+iscache = false(size(filename));
+ismat   = false(size(filename));
+isDD    = false(size(filename));
+usefile = filename;
+
+for k = 1:numel(filename)
+    cachedfile  = disk_cache('get', filename{k});
+    matfilename = get_matfilename(filename{k});
+    
+    if ~isempty(cachedfile) && ~option.exact
+        % use cached file if it exists
+        usefile{k} = cachedfile;
+        iscache(k) = true;
+    elseif strcmp(matfilename,filename{k})
+        % filename is a matfile
+        ismat(k) = true;
+    else
+        % filename is a DD file
+        isDD(k) = true;
+    end
+end
+
+
+% ------------------------------------------------------------------------
+%% start converting DD files in background
+function H = start_convert_DDfiles(filenames, maxproc, verbose)
+
+if isempty(filenames)
+    H = [];
+    return
+end
+
+if verbose >= 3
+    opt_verbose = '-verbose';
+else
+    opt_verbose = '';
+end
+
+% define PYDD2mat command for each filename
+commands = cell(numel(filenames), 1);
+for k = 1:numel(filenames)
+    % include executable
+    %#include_file = whichexe('PYdd2matfile')
+    tempmatfile = get_tempmatfilename(filenames{k});
+    commands{k} = ['PYdd2matfile ' opt_verbose ' -mat "' tempmatfile '" "' filenames{k} '"'];
+end
+
+% run commands in background
+H = SystemBackground(commands, maxproc);
+
+
+% ------------------------------------------------------------------------
+%% handle mat file
+function [out, t_timing] = handle_matfile(filename, option)
+%% initialize
+t_timing = zeros(1, 8);
+
+%% read MAT-file
+t0 = now;
+try
+    data = [];
+    data = load(filename, 'traces');
+catch %#ok<*CTCH>
+    warning('not a compatible DNDM2MAT mat-file')  %#ok<*WNTAG> %aanpassen
+end
+
+t_timing(2) = (now-t0)*3600*24;
+if option.verbose >= 3
+    fprintf('load mat = %f [s]\n', t_timing(2));
+end
+
+%% save trace to disk cache
+
+%% get traces
+if isfield(data, 'traces')
+    out = getfield(data, 'traces'); %#ok<*GFLD>
+    
+    if option.cache & ~isempty(out)
+        t0 = now;
+        tempfile = [tempname '.smx'];
+        write_smx(tempfile, out);
+        % put tempfile as filename in cache
+        disk_cache('put', filename, tempfile);
+        
+        t_timing(7) = (now-t0)*3600*24;
+        if option.verbose >= 3
+            fprintf('save cache = %f [s]\n', t_timing(7));
+        end
+    end
+    
+    % cat same trace signals
+    if option.cat
+        out=DNDM_cat_same_signals(out);
+    end
+else
+    out = [];
+end
+
+%% convert to specified format
+t0 = now;
+
+out = DNDM_change_format(out, option.format);
+
+t_timing(5) = (now-t0)*3600*24;
+if option.verbose >= 3
+    fprintf('convert to format = %f [s]\n', t_timing(5));
+end
+
+out.file=filename;
+
+% ------------------------------------------------------------------------
+%% handle cached files
+function [out, t_timing] = handle_cachedfile(filename, option)
+%% initialize
+t_timing = zeros(1, 8);
+
+%% read cached data
+t0 = now;
+out = read_smx(filename);
+
+t_timing(1) = (now-t0)*3600*24;
+if option.verbose >= 3
+    fprintf('load cache = %f [s]\n', t_timing(1));
+end
+
+%% save trace to MAT-file
+if option.mat & ~isempty(out)
+    t0 = now;
+    
+    create_matfile(out, filename);
+    
+    t_timing(6) = (now-t0)*3600*24;
+    if option.verbose >= 3
+        fprintf('save mat = %f [s]\n', t_timing(6));
+    end
+end
+
+%% convert to specified format
+t0 = now;
+
+out = DNDM_change_format(out, option.format);
+
+t_timing(5) = (now-t0)*3600*24;
+if option.verbose >= 3
+    fprintf('convert to format = %f [s]\n', t_timing(5));
+end
+
+
+% ------------------------------------------------------------------------
+%% handle converting DD files
+function [out, t_timing] = handle_converted_DDfile(filename, H, nr, option)
+%% initialize
+t_timing = zeros(1, 8);
+t0 = now;
+
+%% get DD data
+if ~isempty(H)
+    %% get data from background converted DD file
+    if H.getStatus(nr)
+        warning('Converting DD-file to MAT failed: %s\n%s', filename, H.getResult(nr))
+        data = [];
+    else
+        % read DD-file
+        if option.verbose >= 3
+            fprintf('%s', H.getResult(nr))
+        end
+        try
+            tempmatfile = get_tempmatfilename(filename);
+            data = [];
+            load(tempmatfile);
+            delete(tempmatfile);
+        catch
+            warning('reading DD-file failed : %s\n%s', filename, lasterr) %#ok<LERR>
+            data = [];
+        end
+        
+    end
+else
+    % convert DD file in Matlab
+    try
+        if islitho & islinux & exist('lib/matlab2012a/PYdd2mat2012a.mexglx','file')
+            data = PYdd2mat2012a(filename); %work arround for only Voyager systems (PYdd2mat is only available for matlab6.1 for Twinscan software!!)
+        else
+            data = PYdd2mat(filename);
+        end
+    catch
+        warning('converting DD-file failed : %s\n%s', filename, lasterr) %#ok<LERR>
+        data = [];
+    end
+end
+
+t_timing(3) = (now-t0)*3600*24;
+if option.verbose >= 3
+    fprintf('read data = %f [s]\n', t_timing(3));
+end
+
+%% convert DD-data to format 2
+if ~isempty(data)
+    t0 = now;
+    
+    % convert to format 2
+    try
+        if isfield(data, 'set_result_v1')
+            out = handle_res(data, option);
+        elseif isfield(data, 'DNxDH_OBJECT_LIST')
+            out = handle_gdd(data, option);
+        else
+            warning('file "%s" is not a res or gdd file', filename);
+            out = data;
+        end
+    catch
+        warning('converting DD data to format 2 from file "%s" failed.\n%s', filename, lasterrorReport);
+        out = [];
+    end
+    
+    % store filename
+    if ~isempty(out)
+        out.file = filename;
+        out.info.version=strrep(mfilename,'DNDM2MAT','');
+    end
+    
+    t_timing(4) = (now-t0)*3600*24;
+    if option.verbose >= 3
+        fprintf('convert data = %f [s]\n', t_timing(4));
+    end
+else
+    out = [];
+end
+
+%% save trace to MAT-file
+if option.mat & ~isempty(out)
+    t0 = now;
+    
+    success = create_matfile(out, filename);
+    if option.keep_orgin == 0 & success
+        delete(filename)
+    end
+    
+    t_timing(6) = (now-t0)*3600*24;
+    if option.verbose >= 3
+        fprintf('save mat = %f [s]\n', t_timing(6));
+    end
+end
+
+%% save trace to disk cache
+if option.cache & ~isempty(out)
+    t0 = now;
+    
+    tempfile = [tempname '.smx'];
+    write_smx(tempfile, out);
+    if option.mat
+        % put tempfile as matfilename in cache
+        disk_cache('put', get_matfilename(filename), tempfile);
+    else
+        % put tempfile as filename in cache
+        disk_cache('put', filename, tempfile);
+    end
+    
+    t_timing(7) = (now-t0)*3600*24;
+    if option.verbose >= 3
+        fprintf('save cache = %f [s]\n', t_timing(7));
+    end
+end
+
+%% cat same trace signals
+if option.cat
+    out=DNDM_cat_same_signals(out);
+end
+
+%% convert to specified format
+if ~isempty(out)
+    t0 = now;
+    
+    out = DNDM_change_format(out, option.format);
+    
+    t_timing(5) = (now-t0)*3600*24;
+    if option.verbose >= 3
+        fprintf('convert to format = %f [s]\n', t_timing(5));
+    end
+end
+
+
+% ------------------------------------------------------------------------
+%% create_matfile
+function success = create_matfile(traces, filename)
+name = get_matfilename(filename);
+success = false;
+try
+    if ~MatlabVerLessThan('7.0')
+        save(name, 'traces', '-v6');
+    else
+        save(name, 'traces');
+    end
+    % preserve timestamp
+    touch(name, filename);
+    success = exist(name, 'file') == 2;
+catch
+    warning('saving to mat-file failed.\n%s', lasterr); %#ok<LERR>
+end
+
+
+% ------------------------------------------------------------------------
+% strip optional extensions from filename and add .mat extension
+function matfilename = get_matfilename(filename)
+
+% pattern to match exactely one of these extensions
+extensionpattern = '(\.mat$|\.DNDM_data.res$|\.res$|\.gdd$|\.DNDM_data\.res\.gz$|\.res\.gz$|\.gdd\.gz$)';
+
+% strip extension from filenames and determine unique basename
+basename = regexprep(filename, extensionpattern, '');
+
+% add .mat extension
+matfilename = [basename '.mat'];
+
+
+% ------------------------------------------------------------------------
+%% get_tempmatfilename unique for this Matlab session for specified file
+function matfile = get_tempmatfilename(filename)
+pid = num2str(feature('getpid'));
+hash = sha1hash(filename);
+matfile = [tempdir pid '_' hash '.mat'];
+
+
+% ------------------------------------------------------------------------
+%% collect_logdata
+function collect_logdata(filename, traces, t_timing, option)
+logpath = fullfile(servo_planar_share, 'Public', 'DNDM2MAT_LOG');
+if exist(logpath, 'dir') == 7
+    clk = clock;
+    date = sprintf('%d%02d%02d', clk(1:3));
+    logfile = fullfile(logpath, sprintf('DNDM2MAT_v3_%s.log', date));
+    
+    log = option;
+    log.duration = sum(t_timing);             % total duration
+    log.timing = 100*t_timing./log.duration;  % relative duration in percent
+    log.date = sprintf('%d-%02d-%02d %02d:%02d:%02d', floor(clk));
+    [path, name, ext] = fileparts(filename);
+    log.filename = [name ext];
+    log.fileloction = path;
+    d = dir(filename);
+    log.filedate = d.date;
+    log.filesize = d.bytes;
+    log.datatype = 0;
+    if isfield(traces, 'traces')
+        log.datatype = log.datatype+4;
+        log.sets = numel(traces.traces);
+        log.signals = size(char({traces.traces.struct}), 1);
+    end
+    if isfield(traces, 'frequency_responces')
+        log.datatype = log.datatype+2;
+        log.tfsize = size(traces.frequency_responces(1).transfer);
+        if isfield(traces.frequency_responces, 'specs')
+            log.tfspecs = 1;
+        else
+            log.tfspecs = 0;
+        end
+    end
+    if isfield(traces, 'data')
+        log.datatype = log.datatype+1;
+    end
+    if isfield(traces, 'struct')
+        log.datatype = log.datatype+4;
+        log.sets = numel(traces);
+        log.signals = size(char({traces.struct}), 1);
+    end
+    
+    % deterine username, operation system and matlab version
+    if isunix
+        log.user = getenv('USER');
+        log.os = 'UNIX';
+    else
+        log.user = getenv('username');
+        log.os = 'WIN';
+    end
+    log.matlabversion = version;
+    
+    % stack of calling functions
+    Q = dbstack;
+    log.dstack = [];
+    for k = numel(Q):-1:3
+        if k == 3
+            toolsep = '';
+        else
+            toolsep = '->';
+        end
+        log.dstack = sprintf('%s%s%s', log.dstack, Q(k).name, toolsep);
+    end
+    
+    % create log string
+    logstr = [];
+    flds = fieldnames(log);
+    for f = 1:numel(flds)
+        val = getfield(log, flds{f});
+        if ~ischar(val)
+            val = sprintf('%f ', val);
+        else
+            val = sprintf('"%s"', strrep(val, '\', '/'));
+        end
+        logstr = sprintf('%s%s=%s|', logstr, flds{f}, val);
+    end
+    logstr = sprintf('%s\n', logstr);
+    
+    try
+        % write log string to logfile
+        fid = fopen(logfile, 'a', 'n', 'UTF-8');
+        fprintf(fid, logstr);
+        fclose(fid);
+    catch
+    end
+end
+
+
+% ------------------------------------------------------------------------
+% Number of available processors or logical cores
+function n = numproc
+
+try
+    r = java.lang.Runtime.getRuntime;
+    n = r.availableProcessors;
+catch
+    n = 1;
+end
+
+function traces=DNDM_cat_same_signals(traces)
+if isfield(traces,'traces') & ~isempty(traces.traces)
+    lst=traces.traces.struct;
+    for n=1:size(lst,1)
+        flds=strsplit(lst(n,:),'.');
+        data=getfield(traces,'traces',flds{:});
+        if numel(data)>1
+            %             x=[];
+            %             s=[];
+            %             i=[];
+            %             for nn=1:numel(data)
+            %                 x=[x;data(nn).time];
+            %                 s=[s;data(nn).time.^0*nn];
+            %                 i=[i;(1:numel(data(nn).time))'];
+            %             end
+            %             [trash,id]=unique(x);
+            %             id_overlap=setdiff(1:numel(x),id)
+            %             figure
+            %             plot(x(id_overlap));hold all
+            %             plot(s(id_overlap))
+            %             plot(i(id_overlap)/16384)
+            
+            %check on time axes
+            ts=[];
+            for s=1:numel(data)
+                %ts contains the start times of the traces with identical trace
+                %points
+                ts(s)=data(s).time(1);
+            end
+            [trash,id]=sort(ts);
+            
+            overlap=0;
+
+            
+            %% ----------------------------------------------------------------------
+            %Implemented by EBoq
+            % 20150402 EBoq
+            % Add field trigger_definition.start_trigger_time in total time
+            % This should fix time updates in between of multi buffered traces with
+            % MI. For stages traces this field always appears to be 0.
+            x = [];
+            y = [];
+            cat_succeeded=1;
+            plot_fig = 0;
+            disp_warning = 0;
+            delta_offset = 0;
+            %all_offsets = [];
+            trigger_offset = [];
+            
+            for ii = 1:length(id)
+                %Trace time stampe will be corrected with trigger_offset
+                %trigger_offset(ii) = data(id(ii)).trigger_definition.start_trigger_time;
+                trigger_offset{ii} = data(id(ii)).trigger_definition.start_trigger_date;
+                tol_offset = 1e-9;
+                xnew = data(id(ii)).time;
+                ynew = data(id(ii)).values;
+                if ii > 1
+
+                    switch flds{1}
+                        case 'MI'
+                            %elapsed_time_between_timestamps
+                            %delta_offset = trigger_offset(ii) - trigger_offset(ii-1) + all_offsets(ii-1);
+                            delta_offset = elapsed_time_between_timestamps(trigger_offset{ii},trigger_offset{1});
+                            if abs(delta_offset) > tol_offset & disp_warning
+                                fprintf('Signal %s has jumped with %3.2f [us] between trace num %d and %d\n',deblank(lst(n,:)),delta_offset*1e6,ii-1,ii);
+                                plot_fig = 0; %Can be switched to 1 to plot overlapping signals
+                            end
+                            %If the delta between the new and old offsets are too
+                            %large, this is corrected for
+                            xnew = xnew - delta_offset;
+                    end
+                    
+                    %Find overlap between new vector and all previous
+                    %vectors. machine precision causes x and xnew times
+                    %to be not exactly the same ~1e-6 [s] deltas.
+                    %imemberf.m is required to find members.
+                    %us accuracy is not found in trigger start fields
+                    %anymore.
+                    %member_tol = 2e-6;
+                    member_tol = mean(diff(x))/20;
+                    
+                    idx=ismemberf(xnew, x,'tol',member_tol);
+                    if ~any(isnan(y))
+                        idy=ismemberf(ynew, y);
+                    else
+                        cat_succeeded=0;
+                        idy=[];
+                    end
+                    
+                    %Check for ~1 [us] stitching error
+                    jump_xnew = find(diff(idx)~=0);
+                    if isempty(jump_xnew)
+                        %No additional jumps found
+                        xnew_small_jump = 0;
+                        fprintf(' No overlap in data for %s(%d-%d)\n',deblank(lst(n,:)),ii-1,ii);
+                    elseif length(jump_xnew) == 1
+                        %Get small jumps that cannot be gathered from the
+                        %time stamp info. Just match the delta between the
+                        %last overlapping sample.
+
+                        %xnew_small_jump = xnew(jump_xnew)-x(end);
+                        xnew_small_jump = mean(xnew(idx)-x(end+[-sum(idx)+1:0]));
+                        xnew = xnew - xnew_small_jump;
+                        if abs(xnew_small_jump) > member_tol
+                            fprintf(' >> Small jump corrected of %6.3f [us] at trace %s(%d-%d)\n',xnew_small_jump*1e6,deblank(lst(n,:)),ii-1,ii);
+                            plot_fig = 0;
+                        end
+                    elseif length(jump_xnew) > 1
+                        fprintf(' >> multiple jumps found in %s(%d-%d)\n',deblank(lst(n,:)),ii-1,ii);
+                        plot_fig = 1;
+                        cat_succeeded=cat_succeeded*0;
+                    end
+                    
+                    if max(ynew(idx)-y(end+[-sum(idx)+1:0]))>eps
+                        cat_succeeded=cat_succeeded*0;
+                        fprintf(' >> overlapping value are not matching for %s(%d-%d)\n',deblank(lst(n,:)),ii-1,ii);
+                    end
+                    
+                    x=[x;xnew(~idx)];
+                    y=[y;ynew(~idx)];
+                else
+                    x = xnew;
+                    y = ynew;
+                end
+%                previous_offset = trigger_offset; %save trigger_offset for next loop
+%                all_offsets(ii) = delta_offset;
+            end
+            %% ----------------------------------------------------------------------
+            
+            %fprintf('FIXED (%d,%d) : %s\n',numel(x),numel(y),lst(n,:))
+            if  plot_fig
+                figure
+                plot(x,y,'k','linewidth',3);hold all
+                offset = data(id(1)).trigger_definition.start_trigger_time;
+                for s=1:numel(data)
+                    offset_new = data(s).trigger_definition.start_trigger_time;
+                    delta = offset_new - offset;
+                    plot(data(s).time-delta,data(s).values);
+                    offset = offset_new;
+                end
+                title(lst(n,:))
+            end
+
+            if (max(diff(x))-min(diff(x)))> 1e-9
+                fprintf(' >> discontinuity in time axes :%s\n',lst(n,:))
+                cat_succeeded=cat_succeeded*0;
+            end
+         
+            if cat_succeeded
+                data=data(1);
+                data.time=x;
+                data.values=y;
+                traces=setfield(traces,'traces',flds{:},data);
+            else
+                fprintf('Stitching traces is failed for : %s\n',lst(n,:));
+            end
+
+            
+            %             %disp(['candidate (',num2str(n),'): ',lst(n,:) ]);
+            %             %x=[data.time];
+            %             %y=[data.values];
+            %             x=[];
+            %             y=[];
+            %             for nn=1:numel(data)
+            %                 x=[x;data(nn).time];
+            %                 y=[y;data(nn).values];
+            %             end
+            %             dx=diff(x);
+            %             ts=mean(dx(1:numel(dx)));
+            %             ts_3s=3*std(dx(1:numel(dx)));
+            %
+            %             %              tol=10e-6;
+            %             %              xr=round(x/tol)*tol;%round off
+            %             %             [trash,id]=unique(xr);
+            %             [trash,id]=unique(x);
+            %             %[trash,id]=unique(y);
+            %
+            %             %if (option.cat==1 & all(abs(diff(x)-ts)<ts_3s)) | option.cat>1
+            %             %if max(abs(diff(x(id))-ts))<=ts_3s
+            %             crit=0.1*ts;
+            %             %idc=find(abs(diff(x(id)))<=crit); %remome double samples nearby
+            %             %id=setdiff(id,id(idc));
+            %
+            %             if max(abs(diff(x(id))-ts))<crit
+            %                 %xcorr
+            %                 data=data(1);
+            %                 data.time=x(id);
+            %                 data.values=y(id);
+            %                 traces=setfield(traces,'traces',flds{:},data);
+            %             else
+            %
+            %                 %disp(sprintf('CAT criteria intervention  %d <%d : %s',max(abs(diff(x(id))-ts)),crit,lst(n,:)))
+            %             end
+        end
+    end
+end
